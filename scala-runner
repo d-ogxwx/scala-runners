@@ -12,6 +12,7 @@ declare -r app_name
 declare scala_version=latest.stable
 declare -a java_args residual_args
 declare verbose print_scala_version
+declare scala3_flag
 
 declare -r scala_ea_builds_url=https://scala-ci.typesafe.com/artifactory/scala-integration
 declare -r scala_pr_builds_url=https://scala-ci.typesafe.com/artifactory/scala-pr-validation-snapshots
@@ -104,6 +105,35 @@ setScalaPrVersion() {
   local sha=$(jq -r '.head.sha' <<< "$prInfo")
   setScalaVersion "$base_version-${sha:0:7}-SNAPSHOT"
 }
+setScala3Version() {
+  vlog "[setScala3Version] arg = '$1'"
+
+  # Extract scala3 version suffix such as M[1-3], RC[1-3] 
+  local scala3Version="3.0.0-${1:3}" 
+  url="https://repo1.maven.org/maven2/org/scala-lang/scala3-staging_$scala3Version/maven-metadata.xml"
+
+  # Check to exist `$scala3Version` version.
+  statusCode="$(curl -o /dev/null -s -w "%{http_code}\n" "$url")"
+  [[ "$statusCode" != "200" ]] && die "failed to get scala \`$scala3Version\` version"
+  body="$(curl -s -o - "$url")"
+
+  # If `$scala3Version` matches the value that is the version tag in maven-metadata.xml, pass the `$scala3Version` version to `$scala_version`.
+  # On the other hand, if it does not exist, pass the value of the latest tag.
+  tmp="$(echo "$body" | grep "<version>$scala3Version</version>")"
+  [[ "$tmp" != "" ]] && {
+    scala_version="$scala3Version"
+  } || {
+    tmp="${body##*<latest>}"
+    scala_version="${tmp%%</latest>*}"
+  }
+  
+  groupId="org.scala-lang"
+  artifactId="scala3-staging_$scala3Version"
+  repository="https://repo1.maven.org/maven2/org/scala-lang/scala3-staging_$scala3Version"
+
+  addCoursier "-r=$repository"
+  addCoursier "$groupId:$artifactId:$scala_version"
+}
 
 usage() {
   cat <<EOM
@@ -166,6 +196,7 @@ while [[ $# -gt 0 ]]; do
                             -213) setScalaVersion "2.13+"  && shift ;;
           -2.1[2-4].@(head|next)) setScalaVersion "${1:1}" && shift ;; # 2.1[2-4].head or 2.1[2-4].next
      -2.@([89]|1[0-4]).+([0-9])*) setScalaVersion "${1:1}" && shift ;; # 2.[89].z* or 2.1[0-4].z*
+            -3.@(M[1-3]|RC[1-3])) scala3_flag=1 && setScala3Version "$1" && shift ;;
                  --scala-version) require_arg version     "$1" "$2" && setScalaVersion   "$2" && shift 2 ;;
                       --scala-pr) require_arg "PR number" "$1" "$2" && setScalaPrVersion "$2" && shift 2 ;;
                              -C*) addCoursier "${1:2}"     && shift ;;
@@ -210,6 +241,18 @@ if [[ -n "$print_scala_version" ]]; then
   echo "$sv"
   exit
 fi
+
+[[ -n "$scala3_flag" ]] && {
+  case "$app_name" in 
+    scala)
+      execRunner java -cp "$(cs fetch --classpath "${coursier_args[@]}"):." "${residual_args[@]}"
+      ;;
+    scalac)
+      execRunner cs launch "${coursier_args[@]}" -M dotty.tools.dotc.Main -- -usejavacp "${residual_args[@]}"
+      ;;
+  esac
+  exit 0
+} 
 
 execRunner cs launch \
   "$app_name:$scala_version" \
